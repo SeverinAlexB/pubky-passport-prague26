@@ -395,6 +395,14 @@ export default function Page() {
 
     const stored = readStoredTokens();
     if (!stored) {
+      if (pendingDeepLinkRef.current) {
+        try {
+          beginGoogleLogin(pendingDeepLinkRef.current);
+        } catch (err) {
+          setStatus({ kind: "error", message: (err as Error).message });
+        }
+        return;
+      }
       setStatus({ kind: "idle" });
       return;
     }
