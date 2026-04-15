@@ -101,6 +101,10 @@ export default function Page() {
   const [parsing, setParsing] = useState(false);
   const [authStatus, setAuthStatus] = useState<AuthStatus>({ kind: "idle" });
   const [showDebug, setShowDebug] = useState(false);
+  const [showBackup, setShowBackup] = useState(false);
+  const [backupPass, setBackupPass] = useState("");
+  const [backupPass2, setBackupPass2] = useState("");
+  const [backupError, setBackupError] = useState<string | null>(null);
 
   const secretRef = useRef<Uint8Array | null>(null);
   const signerSessionRef = useRef<PubkySession | null>(null);
@@ -124,6 +128,10 @@ export default function Page() {
     setPasteValue("");
     setPasteError(null);
     setAuthStatus({ kind: "idle" });
+    setBackupPass("");
+    setBackupPass2("");
+    setBackupError(null);
+    setShowBackup(false);
     Object.values(SS).forEach((k) => sessionStorage.removeItem(k));
     setStatus({ kind: "idle" });
   }, []);
@@ -337,6 +345,42 @@ export default function Page() {
     setAuthStatus({ kind: "idle" });
   };
 
+  const handleDownloadRecovery = () => {
+    setBackupError(null);
+    const session = signerSessionRef.current;
+    if (!session) {
+      setBackupError("Signer not ready");
+      return;
+    }
+    if (backupPass.length < 8) {
+      setBackupError("Passphrase must be at least 8 characters.");
+      return;
+    }
+    if (backupPass !== backupPass2) {
+      setBackupError("Passphrases do not match.");
+      return;
+    }
+    try {
+      const bytes = session.keypair.createRecoveryFile(backupPass);
+      const z32 = session.publicKeyZ32;
+      const copy = new Uint8Array(bytes);
+      const blob = new globalThis.Blob([copy], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `pubky-${z32.slice(0, 8)}.pkarr`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setBackupPass("");
+      setBackupPass2("");
+      resetIdle();
+    } catch (err) {
+      setBackupError((err as Error).message ?? "Failed to create recovery file");
+    }
+  };
+
   return (
     <main className="min-h-full flex items-center justify-center p-6">
       <div className="w-full max-w-xl space-y-6">
@@ -455,6 +499,62 @@ export default function Page() {
                 onContinue={handleParsePaste}
               />
             )}
+
+            <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4">
+              <button
+                className="text-xs text-neutral-400 hover:text-neutral-200"
+                onClick={() => {
+                  setShowBackup((s) => !s);
+                  if (showBackup) {
+                    setBackupPass("");
+                    setBackupPass2("");
+                    setBackupError(null);
+                  }
+                }}
+              >
+                {showBackup ? "Hide" : "Show"} backup · download recovery file
+              </button>
+              {showBackup && (
+                <div className="mt-3 space-y-3">
+                  <p className="text-xs text-neutral-500">
+                    Encrypts your Pubky secret with a passphrase into a standard pubky recovery file.
+                    Store it somewhere safe; anyone with the file and passphrase can recover your Pubky.
+                  </p>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    className="w-full rounded border border-neutral-800 bg-black/40 p-2 text-sm placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+                    placeholder="Passphrase (min. 8 chars)"
+                    value={backupPass}
+                    onChange={(e) => {
+                      setBackupPass(e.target.value);
+                      if (backupError) setBackupError(null);
+                    }}
+                  />
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    className="w-full rounded border border-neutral-800 bg-black/40 p-2 text-sm placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+                    placeholder="Confirm passphrase"
+                    value={backupPass2}
+                    onChange={(e) => {
+                      setBackupPass2(e.target.value);
+                      if (backupError) setBackupError(null);
+                    }}
+                  />
+                  {backupError && (
+                    <p className="text-xs text-red-400">{backupError}</p>
+                  )}
+                  <button
+                    className="rounded bg-white px-4 py-2 text-sm font-medium text-black hover:bg-neutral-200 disabled:opacity-50"
+                    onClick={handleDownloadRecovery}
+                    disabled={!backupPass || !backupPass2}
+                  >
+                    Download recovery file
+                  </button>
+                </div>
+              )}
+            </div>
 
             <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4">
               <button
