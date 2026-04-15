@@ -32,6 +32,16 @@ export async function downloadBlob(accessToken: string, fileId: string): Promise
   return (await res.json()) as Blob;
 }
 
+export async function deleteBlob(accessToken: string, fileId: string): Promise<void> {
+  const res = await fetch(`${DRIVE_API}/files/${fileId}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`drive delete failed: ${res.status}`);
+  }
+}
+
 export async function uploadBlob(accessToken: string, blob: Blob): Promise<DriveFile> {
   const boundary = `----passport${crypto.getRandomValues(new Uint32Array(1))[0].toString(16)}`;
   const metadata = { name: BLOB_NAME, parents: ["appDataFolder"], mimeType: "application/json" };

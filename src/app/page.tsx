@@ -8,7 +8,7 @@ import {
   wipe,
   type Blob,
 } from "@/lib/crypto-client";
-import { downloadBlob, findBlobFile, uploadBlob, type DriveFile } from "@/lib/drive";
+import { deleteBlob, downloadBlob, findBlobFile, uploadBlob, type DriveFile } from "@/lib/drive";
 import {
   createSigner,
   DEFAULT_HOMESERVER_Z32,
@@ -131,6 +131,8 @@ function readStoredTokens(): { idToken: string; accessToken: string } | null {
   return { idToken, accessToken };
 }
 
+const DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+
 type OidcFragmentResult =
   | { idToken: string; accessToken: string; expiresIn: number; authUrl: string | null }
   | { error: string };
@@ -156,9 +158,19 @@ function consumeOidcFragment(): OidcFragmentResult | null {
   const accessToken = params.get("access_token");
   const expiresInRaw = params.get("expires_in");
   const returnedState = params.get("state");
+  const returnedScope = params.get("scope") ?? "";
   if (!idToken || !accessToken) return null;
 
   scrub();
+
+  if (!returnedScope.split(" ").includes(DRIVE_APPDATA_SCOPE)) {
+    sessionStorage.removeItem(SS.oidcState);
+    sessionStorage.removeItem(SS.oidcNonce);
+    return {
+      error:
+        "Google Drive permission was not granted. On the consent screen, make sure the box for \"See, edit, create and delete only the specific Google Drive files you use with this app\" is checked, then try again.",
+    };
+  }
 
   const expectedCsrf = sessionStorage.getItem(SS.oidcState);
   const expectedNonce = sessionStorage.getItem(SS.oidcNonce);
@@ -228,6 +240,10 @@ export default function Page() {
   const [backupPass, setBackupPass] = useState("");
   const [backupPass2, setBackupPass2] = useState("");
   const [backupError, setBackupError] = useState<string | null>(null);
+  const [showWipe, setShowWipe] = useState(false);
+  const [wipeConfirm, setWipeConfirm] = useState("");
+  const [wipeError, setWipeError] = useState<string | null>(null);
+  const [wiping, setWiping] = useState(false);
 
   const secretRef = useRef<Uint8Array | null>(null);
   const signerSessionRef = useRef<PubkySession | null>(null);
@@ -258,6 +274,37 @@ export default function Page() {
     Object.values(SS).forEach((k) => sessionStorage.removeItem(k));
     setStatus({ kind: "idle" });
   }, []);
+
+  const wipeEverything = useCallback(async () => {
+    setWipeError(null);
+    setWiping(true);
+    const accessToken = sessionStorage.getItem(SS.accessToken);
+    try {
+      if (accessToken) {
+        try {
+          const existing = await findBlobFile(accessToken);
+          if (existing) await deleteBlob(accessToken, existing.id);
+        } catch (err) {
+          console.warn("[passport] wipe: drive delete failed", err);
+        }
+        try {
+          await fetch(
+            `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(accessToken)}`,
+            { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+          );
+        } catch (err) {
+          console.warn("[passport] wipe: token revoke failed", err);
+        }
+      }
+      signOut();
+      setShowWipe(false);
+      setWipeConfirm("");
+    } catch (err) {
+      setWipeError((err as Error).message);
+    } finally {
+      setWiping(false);
+    }
+  }, [signOut]);
 
   const resetIdle = useCallback(() => {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
@@ -585,12 +632,19 @@ export default function Page() {
                     </span>
                   </div>
                 </div>
-                <button
-                  className="text-xs text-neutral-400 hover:text-neutral-200 shrink-0"
-                  onClick={signOut}
-                >
-                  Sign out
-                </button>
+                <div className="flex flex-col items-end gap-1 shrink-0">
+                  <button
+                    className="text-xs text-neutral-400 hover:text-neutral-200"
+                    onClick={signOut}
+                  >
+                    Sign out
+                  </button>
+                  {emailRef.current && (
+                    <span className="text-[10px] text-neutral-500 truncate max-w-[180px]">
+                      {emailRef.current}
+                    </span>
+                  )}
+                </div>
               </div>
               <div className="flex items-center gap-3">
                 <pre
@@ -706,6 +760,61 @@ export default function Page() {
                   <pre className="break-all whitespace-pre-wrap rounded bg-black/40 p-3 font-mono text-xs">
                     {JSON.stringify(status.blob, null, 2)}
                   </pre>
+                  <button
+                    className="rounded bg-red-900/60 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-900 disabled:opacity-50"
+                    disabled={wiping}
+                    onClick={() => {
+                      if (window.confirm("Delete passport from Drive and revoke Google access? This cannot be undone.")) {
+                        void wipeEverything();
+                      }
+                    }}
+                  >
+                    {wiping ? "Wiping…" : "Wipe now (no confirm)"}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-lg border border-red-900/60 bg-red-950/20 p-4">
+              <button
+                className="text-xs text-red-300 hover:text-red-200"
+                onClick={() => {
+                  setShowWipe((s) => !s);
+                  if (showWipe) {
+                    setWipeConfirm("");
+                    setWipeError(null);
+                  }
+                }}
+              >
+                {showWipe ? "Hide" : "Show"} danger zone · delete everything
+              </button>
+              {showWipe && (
+                <div className="mt-3 space-y-3">
+                  <p className="text-xs text-red-200/80">
+                    Deletes <code>passport.json</code> from your Google Drive app folder, revokes this app&apos;s Google access, and signs you out. Your Pubky public key will still exist on the network, but the secret that controls it will be gone forever unless you have a recovery file.
+                  </p>
+                  <p className="text-xs text-neutral-400">
+                    Type <span className="font-mono text-red-300">DELETE</span> to confirm.
+                  </p>
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    className="w-full rounded border border-red-900/60 bg-black/40 p-2 text-sm placeholder:text-neutral-600 focus:border-red-700 focus:outline-none"
+                    placeholder="DELETE"
+                    value={wipeConfirm}
+                    onChange={(e) => {
+                      setWipeConfirm(e.target.value);
+                      if (wipeError) setWipeError(null);
+                    }}
+                  />
+                  {wipeError && <p className="text-xs text-red-400">{wipeError}</p>}
+                  <button
+                    className="rounded bg-red-700 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-40"
+                    disabled={wipeConfirm !== "DELETE" || wiping}
+                    onClick={() => void wipeEverything()}
+                  >
+                    {wiping ? "Wiping…" : "Delete passport and revoke access"}
+                  </button>
                 </div>
               )}
             </div>
