@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@google-cloud/kms": "^5.4.0",
     "@react-oauth/google": "^0.13.5",
     "google-auth-library": "^9.15.0",
     "next": "^15.1.3",
