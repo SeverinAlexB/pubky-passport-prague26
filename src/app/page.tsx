@@ -71,6 +71,7 @@ export default function Page() {
   const secretRef = useRef<Uint8Array | null>(null);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrapKeyRef = useRef<CryptoKey | null>(null);
+  const wrapKeyPromiseRef = useRef<Promise<CryptoKey> | null>(null);
   const emailRef = useRef<string | null>(null);
   const rehydratedRef = useRef(false);
 
@@ -78,6 +79,7 @@ export default function Page() {
     wipe(secretRef.current);
     secretRef.current = null;
     wrapKeyRef.current = null;
+    wrapKeyPromiseRef.current = null;
     emailRef.current = null;
     Object.values(SS).forEach((k) => sessionStorage.removeItem(k));
     setReveal(false);
@@ -100,8 +102,12 @@ export default function Page() {
   }, []);
 
   const unlockWithDrive = useCallback(async (accessToken: string) => {
-    const wrapKey = wrapKeyRef.current;
-    if (!wrapKey) throw new Error("wrapping key missing");
+    let wrapKey = wrapKeyRef.current;
+    if (!wrapKey) {
+      if (!wrapKeyPromiseRef.current) throw new Error("wrapping key missing");
+      setStatus({ kind: "working", message: "Fetching wrapping key…" });
+      wrapKey = await wrapKeyPromiseRef.current;
+    }
 
     setStatus({ kind: "working", message: "Looking up passport in Drive…" });
     const existing = await findBlobFile(accessToken);
@@ -180,25 +186,40 @@ export default function Page() {
       }
     },
     onError: () => setStatus({ kind: "error", message: "Drive authorization failed" }),
+    onNonOAuthError: (err) => {
+      if (err.type === "popup_failed_to_open" || err.type === "popup_closed") {
+        setStatus({ kind: "signed-in" });
+      }
+    },
   });
 
   const onIdToken = useCallback(
-    async (response: CredentialResponse) => {
+    (response: CredentialResponse) => {
       if (!response.credential) {
         setStatus({ kind: "error", message: "No id token returned" });
         return;
       }
-      try {
-        setStatus({ kind: "working", message: "Fetching wrapping key…" });
-        storeIdToken(response.credential);
-        emailRef.current = decodeIdToken(response.credential).email;
-        wrapKeyRef.current = await fetchWrappingKey(response.credential);
-        setStatus({ kind: "signed-in" });
-      } catch (err) {
-        setStatus({ kind: "error", message: (err as Error).message });
-      }
+      const credential = response.credential;
+      storeIdToken(credential);
+      const email = decodeIdToken(credential).email;
+      emailRef.current = email;
+
+      const wrapKeyPromise = fetchWrappingKey(credential).then((k) => {
+        wrapKeyRef.current = k;
+        return k;
+      });
+      wrapKeyPromise.catch((err) =>
+        setStatus({ kind: "error", message: (err as Error).message }),
+      );
+      wrapKeyPromiseRef.current = wrapKeyPromise;
+
+      setStatus({ kind: "working", message: "Opening Drive access…" });
+      requestDriveAccess({
+        prompt: "",
+        ...(email ? { hint: email } : {}),
+      });
     },
-    [fetchWrappingKey],
+    [fetchWrappingKey, requestDriveAccess],
   );
 
   return (
