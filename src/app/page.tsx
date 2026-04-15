@@ -745,12 +745,16 @@ export default function Page() {
               )}
             </div>
 
-            <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-4">
+            <div className={showDebug ? "rounded-lg border border-neutral-800 bg-neutral-900/50 p-4" : ""}>
               <button
-                className="text-xs text-neutral-400 hover:text-neutral-200"
+                className={
+                  showDebug
+                    ? "text-xs text-neutral-400 hover:text-neutral-200"
+                    : "text-[11px] text-neutral-600 hover:text-neutral-400 underline-offset-2 hover:underline"
+                }
                 onClick={() => setShowDebug((s) => !s)}
               >
-                {showDebug ? "Hide" : "Show"} debug · Drive blob
+                {showDebug ? "Hide debug" : "Show debug…"}
               </button>
               {showDebug && (
                 <div className="mt-3 space-y-2">
