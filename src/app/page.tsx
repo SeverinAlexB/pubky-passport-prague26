@@ -11,7 +11,6 @@ import {
 import { deleteBlob, downloadBlob, findBlobFile, uploadBlob, type DriveFile } from "@/lib/drive";
 import {
   createSigner,
-  DEFAULT_HOMESERVER_Z32,
   fetchProfile,
   parseAuthRequest,
   performApproval,
@@ -498,7 +497,6 @@ export default function Page() {
     setAuthStatus({ kind: "approving" });
     try {
       await performApproval(session.signer, pendingAuth, {
-        defaultHomeserverZ32: DEFAULT_HOMESERVER_Z32,
         alreadyEnsured: homeserverEnsuredRef.current,
       });
       homeserverEnsuredRef.current = true;

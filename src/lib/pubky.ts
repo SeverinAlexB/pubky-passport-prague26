@@ -11,10 +11,6 @@ export function loadPubky(): Promise<PubkyModule> {
   return pubkyModulePromise;
 }
 
-export const DEFAULT_HOMESERVER_Z32 =
-  process.env.NEXT_PUBLIC_DEFAULT_HOMESERVER ??
-  "8um71us3fyw6h8wbcxb5ar3rwusy1a6u49956ikzojg3gcwd1dty";
-
 export type PubkySession = {
   keypair: Keypair;
   pubky: Pubky;
@@ -170,7 +166,7 @@ export async function parseAuthRequest(input: string): Promise<ParsedAuthRequest
 export async function performApproval(
   signer: Signer,
   parsed: ParsedAuthRequest,
-  opts: { defaultHomeserverZ32: string; alreadyEnsured: boolean },
+  opts: { alreadyEnsured: boolean },
 ): Promise<void> {
   const mod = await loadPubky();
 
@@ -178,12 +174,7 @@ export async function performApproval(
     const hs = mod.PublicKey.from(parsed.homeserverZ32);
     await signer.signup(hs, parsed.signupToken ?? null);
   } else if (!opts.alreadyEnsured) {
-    try {
-      await signer.signinBlocking();
-    } catch {
-      const hs = mod.PublicKey.from(opts.defaultHomeserverZ32);
-      await signer.signup(hs, null);
-    }
+    await signer.signinBlocking();
   }
 
   await signer.approveAuthRequest(parsed.raw);
