@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { GoogleLogin, useGoogleLogin, type CredentialResponse } from "@react-oauth/google";
 import {
   decryptSecret,
   encryptSecret,
@@ -22,7 +21,8 @@ import {
   type PubkySession,
 } from "@/lib/pubky";
 
-const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+const OIDC_SCOPES = "openid email profile https://www.googleapis.com/auth/drive.appdata";
+const OIDC_AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const IDLE_MS = 5 * 60 * 1000;
 
 const SS = {
@@ -30,7 +30,51 @@ const SS = {
   idExp: "passport.idExp",
   accessToken: "passport.accessToken",
   accessExp: "passport.accessExp",
+  oidcNonce: "passport.oidcNonce",
+  oidcState: "passport.oidcState",
 };
+
+function randomBase64Url(bytes: number): string {
+  const buf = crypto.getRandomValues(new Uint8Array(bytes));
+  let bin = "";
+  for (const b of buf) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlEncode(text: string): string {
+  return btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlDecode(text: string): string {
+  const pad = text.length % 4 === 0 ? "" : "=".repeat(4 - (text.length % 4));
+  return atob(text.replace(/-/g, "+").replace(/_/g, "/") + pad);
+}
+
+function beginGoogleLogin(deepLinkAuthUrl: string | null) {
+  const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    throw new Error("NEXT_PUBLIC_GOOGLE_CLIENT_ID not configured");
+  }
+  const nonce = randomBase64Url(32);
+  const csrf = randomBase64Url(32);
+  const statePayload = deepLinkAuthUrl ? { csrf, authUrl: deepLinkAuthUrl } : { csrf };
+  const state = base64UrlEncode(JSON.stringify(statePayload));
+
+  sessionStorage.setItem(SS.oidcNonce, nonce);
+  sessionStorage.setItem(SS.oidcState, csrf);
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    response_type: "id_token token",
+    scope: OIDC_SCOPES,
+    redirect_uri: window.location.origin,
+    nonce,
+    state,
+    prompt: "consent",
+    include_granted_scopes: "true",
+  });
+  window.location.assign(`${OIDC_AUTHORIZE_ENDPOINT}?${params.toString()}`);
+}
 
 type AuthStatus =
   | { kind: "idle" }
@@ -41,7 +85,6 @@ type AuthStatus =
 type Status =
   | { kind: "loading" }
   | { kind: "idle" }
-  | { kind: "signed-in" }
   | { kind: "working"; message: string }
   | {
       kind: "unlocked";
@@ -86,6 +129,77 @@ function readStoredTokens(): { idToken: string; accessToken: string } | null {
   const now = Date.now();
   if (idExp < now + 5_000 || accessExp < now + 5_000) return null;
   return { idToken, accessToken };
+}
+
+type OidcFragmentResult =
+  | { idToken: string; accessToken: string; expiresIn: number; authUrl: string | null }
+  | { error: string };
+
+function consumeOidcFragment(): OidcFragmentResult | null {
+  if (typeof window === "undefined") return null;
+  const hash = window.location.hash;
+  if (!hash || hash.length < 2) return null;
+  const params = new URLSearchParams(hash.slice(1));
+
+  const scrub = () => {
+    const url = new URL(window.location.href);
+    window.history.replaceState(null, "", url.pathname + url.search);
+  };
+
+  if (params.has("error")) {
+    const msg = params.get("error_description") || params.get("error") || "Sign-in failed";
+    scrub();
+    return { error: msg };
+  }
+
+  const idToken = params.get("id_token");
+  const accessToken = params.get("access_token");
+  const expiresInRaw = params.get("expires_in");
+  const returnedState = params.get("state");
+  if (!idToken || !accessToken) return null;
+
+  scrub();
+
+  const expectedCsrf = sessionStorage.getItem(SS.oidcState);
+  const expectedNonce = sessionStorage.getItem(SS.oidcNonce);
+  sessionStorage.removeItem(SS.oidcState);
+  sessionStorage.removeItem(SS.oidcNonce);
+
+  if (!expectedCsrf || !expectedNonce || !returnedState) {
+    return { error: "OIDC state missing" };
+  }
+
+  let statePayload: { csrf?: string; authUrl?: string };
+  try {
+    statePayload = JSON.parse(base64UrlDecode(returnedState));
+  } catch {
+    return { error: "OIDC state malformed" };
+  }
+  if (statePayload.csrf !== expectedCsrf) {
+    return { error: "OIDC state mismatch" };
+  }
+
+  const payload = decodeIdTokenPayload(idToken);
+  if (!payload || payload.nonce !== expectedNonce) {
+    return { error: "OIDC nonce mismatch" };
+  }
+
+  const expiresIn = Number(expiresInRaw);
+  return {
+    idToken,
+    accessToken,
+    expiresIn: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600,
+    authUrl: typeof statePayload.authUrl === "string" ? statePayload.authUrl : null,
+  };
+}
+
+function decodeIdTokenPayload(idToken: string): Record<string, unknown> | null {
+  try {
+    const [, b64] = idToken.split(".");
+    return JSON.parse(atob(b64.replace(/-/g, "+").replace(/_/g, "/")));
+  } catch {
+    return null;
+  }
 }
 
 function readAuthUrlFromLocation(): string | null {
@@ -208,6 +322,31 @@ export default function Page() {
     if (rehydratedRef.current) return;
     rehydratedRef.current = true;
     pendingDeepLinkRef.current = readAuthUrlFromLocation();
+
+    const fragment = consumeOidcFragment();
+    if (fragment) {
+      if ("error" in fragment) {
+        setStatus({ kind: "error", message: fragment.error });
+        return;
+      }
+      if (fragment.authUrl) pendingDeepLinkRef.current = fragment.authUrl;
+      storeIdToken(fragment.idToken);
+      storeAccessToken(fragment.accessToken, fragment.expiresIn);
+      emailRef.current = decodeIdToken(fragment.idToken).email;
+      (async () => {
+        try {
+          setStatus({ kind: "working", message: "Fetching wrapping key…" });
+          const wrapKey = await fetchWrappingKey(fragment.idToken);
+          wrapKeyRef.current = wrapKey;
+          await unlockWithDrive(fragment.accessToken);
+        } catch (err) {
+          Object.values(SS).forEach((k) => sessionStorage.removeItem(k));
+          setStatus({ kind: "error", message: (err as Error).message });
+        }
+      })();
+      return;
+    }
+
     const stored = readStoredTokens();
     if (!stored) {
       setStatus({ kind: "idle" });
@@ -281,54 +420,6 @@ export default function Page() {
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     };
   }, [status.kind, resetIdle]);
-
-  const requestDriveAccess = useGoogleLogin({
-    flow: "implicit",
-    scope: DRIVE_SCOPE,
-    onSuccess: async (tokenResponse) => {
-      try {
-        storeAccessToken(tokenResponse.access_token, tokenResponse.expires_in);
-        await unlockWithDrive(tokenResponse.access_token);
-      } catch (err) {
-        setStatus({ kind: "error", message: (err as Error).message });
-      }
-    },
-    onError: () => setStatus({ kind: "error", message: "Drive authorization failed" }),
-    onNonOAuthError: (err) => {
-      if (err.type === "popup_failed_to_open" || err.type === "popup_closed") {
-        setStatus({ kind: "signed-in" });
-      }
-    },
-  });
-
-  const onIdToken = useCallback(
-    (response: CredentialResponse) => {
-      if (!response.credential) {
-        setStatus({ kind: "error", message: "No id token returned" });
-        return;
-      }
-      const credential = response.credential;
-      storeIdToken(credential);
-      const email = decodeIdToken(credential).email;
-      emailRef.current = email;
-
-      const wrapKeyPromise = fetchWrappingKey(credential).then((k) => {
-        wrapKeyRef.current = k;
-        return k;
-      });
-      wrapKeyPromise.catch((err) =>
-        setStatus({ kind: "error", message: (err as Error).message }),
-      );
-      wrapKeyPromiseRef.current = wrapKeyPromise;
-
-      setStatus({ kind: "working", message: "Opening Drive access…" });
-      requestDriveAccess({
-        prompt: "",
-        ...(email ? { hint: email } : {}),
-      });
-    },
-    [fetchWrappingKey, requestDriveAccess],
-  );
 
   const handleParsePaste = async () => {
     setPasteError(null);
@@ -430,30 +521,22 @@ export default function Page() {
         {status.kind === "idle" && (
           <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-6 space-y-3">
             <p className="text-sm text-neutral-300">
-              Step 1 of 2: Sign in with Google to prove your identity.
-            </p>
-            <GoogleLogin onSuccess={onIdToken} onError={() => setStatus({ kind: "error", message: "Sign-in failed" })} />
-          </div>
-        )}
-
-        {status.kind === "signed-in" && (
-          <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-6 space-y-3">
-            <p className="text-sm text-neutral-300">
-              Step 2 of 2: Allow access to your Google Drive app storage.
+              Sign in with Google to unlock your passport. We&apos;ll request Drive app-storage access in the same step.
             </p>
             <button
               className="rounded bg-white px-4 py-2 text-sm font-medium text-black hover:bg-neutral-200"
-              onClick={() =>
-                requestDriveAccess({
-                  prompt: "",
-                  ...(emailRef.current ? { hint: emailRef.current } : {}),
-                })
-              }
+              onClick={() => {
+                try {
+                  beginGoogleLogin(pendingDeepLinkRef.current);
+                } catch (err) {
+                  setStatus({ kind: "error", message: (err as Error).message });
+                }
+              }}
             >
-              Authorize Drive access
+              Sign in with Google
             </button>
             <p className="text-xs text-neutral-500">
-              Stored in a hidden, app-only folder. Not visible in your main Drive UI.
+              Your encrypted secret lives in a hidden, app-only folder. Not visible in your main Drive UI.
             </p>
           </div>
         )}
