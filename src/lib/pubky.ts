@@ -35,6 +35,58 @@ export async function createSigner(secret: Uint8Array): Promise<PubkySession> {
   };
 }
 
+export type PubkyProfile = {
+  name?: string;
+  /** Data URL ready for <img src>, resolved from the homeserver blob chain. */
+  imageDataUrl?: string;
+};
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(
+      null,
+      Array.from(bytes.subarray(i, i + chunk)),
+    );
+  }
+  return btoa(binary);
+}
+
+async function resolveImage(pubky: Pubky, imageUri: string): Promise<string | undefined> {
+  try {
+    const fileRecord = await pubky.publicStorage.getJson(imageUri as `pubky://${string}/pub/${string}`);
+    if (!fileRecord || typeof fileRecord !== "object") return undefined;
+    const src = typeof fileRecord.src === "string" ? fileRecord.src : undefined;
+    const contentType =
+      typeof fileRecord.content_type === "string" ? fileRecord.content_type : "image/*";
+    if (!src) return undefined;
+    const bytes = await pubky.publicStorage.getBytes(src as `pubky://${string}/pub/${string}`);
+    return `data:${contentType};base64,${bytesToBase64(bytes)}`;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function fetchProfile(
+  pubky: Pubky,
+  publicKeyZ32: string,
+): Promise<PubkyProfile | null> {
+  try {
+    const address = `pubky://${publicKeyZ32}/pub/pubky.app/profile.json` as const;
+    const raw = await pubky.publicStorage.getJson(address);
+    if (!raw || typeof raw !== "object") return null;
+    const name = typeof raw.name === "string" ? raw.name.trim() : undefined;
+    const imageUri =
+      typeof raw.image === "string" && raw.image.startsWith("pubky://") ? raw.image : undefined;
+    const imageDataUrl = imageUri ? await resolveImage(pubky, imageUri) : undefined;
+    if (!name && !imageDataUrl) return null;
+    return { name, imageDataUrl };
+  } catch {
+    return null;
+  }
+}
+
 export type Capability = {
   path: string;
   perms: string;

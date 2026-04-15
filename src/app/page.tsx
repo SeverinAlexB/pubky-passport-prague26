@@ -13,10 +13,12 @@ import { downloadBlob, findBlobFile, uploadBlob, type DriveFile } from "@/lib/dr
 import {
   createSigner,
   DEFAULT_HOMESERVER_Z32,
+  fetchProfile,
   parseAuthRequest,
   performApproval,
   relayHost,
   type ParsedAuthRequest,
+  type PubkyProfile,
   type PubkySession,
 } from "@/lib/pubky";
 
@@ -41,7 +43,14 @@ type Status =
   | { kind: "idle" }
   | { kind: "signed-in" }
   | { kind: "working"; message: string }
-  | { kind: "unlocked"; pubkyZ32: string; blob: Blob; file: DriveFile; created: boolean }
+  | {
+      kind: "unlocked";
+      pubkyZ32: string;
+      blob: Blob;
+      file: DriveFile;
+      created: boolean;
+      profile: PubkyProfile | null | undefined;
+    }
   | { kind: "error"; message: string };
 
 function decodeIdToken(idToken: string): { exp: number | null; email: string | null } {
@@ -191,6 +200,7 @@ export default function Page() {
       blob,
       file,
       created,
+      profile: undefined,
     });
   }, []);
 
@@ -216,6 +226,26 @@ export default function Page() {
       }
     })();
   }, [fetchWrappingKey, unlockWithDrive]);
+
+  useEffect(() => {
+    if (status.kind !== "unlocked") return;
+    if (status.profile !== undefined) return;
+    const session = signerSessionRef.current;
+    if (!session) return;
+    let cancelled = false;
+    (async () => {
+      const profile = await fetchProfile(session.pubky, session.publicKeyZ32);
+      if (cancelled) return;
+      setStatus((prev) =>
+        prev.kind === "unlocked" && prev.pubkyZ32 === session.publicKeyZ32
+          ? { ...prev, profile }
+          : prev,
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [status]);
 
   useEffect(() => {
     if (status.kind !== "unlocked") return;
@@ -448,20 +478,43 @@ export default function Page() {
 
         {status.kind === "unlocked" && (
           <div className="space-y-4">
-            <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-6 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs uppercase tracking-wide text-neutral-400">
-                  Your Pubky
-                </span>
+            <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-6 space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  {status.profile?.imageDataUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={status.profile.imageDataUrl}
+                      alt=""
+                      className="h-12 w-12 rounded-full object-cover bg-neutral-800 shrink-0"
+                    />
+                  ) : (
+                    <div className="h-12 w-12 rounded-full bg-neutral-800 flex items-center justify-center text-sm font-medium text-neutral-300 shrink-0">
+                      {(status.profile?.name ?? status.pubkyZ32).slice(0, 2).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <h2 className="text-lg font-semibold truncate">
+                      {status.profile?.name ?? "Your Pubky"}
+                    </h2>
+                    <span className="text-xs uppercase tracking-wide text-neutral-400">
+                      {status.profile?.name ? "Pubky identifier" : "Public key"}
+                    </span>
+                  </div>
+                </div>
                 <button
-                  className="text-xs text-neutral-400 hover:text-neutral-200"
+                  className="text-xs text-neutral-400 hover:text-neutral-200 shrink-0"
                   onClick={signOut}
                 >
                   Sign out
                 </button>
               </div>
               <div className="flex items-center gap-3">
-                <pre className="flex-1 break-all whitespace-pre-wrap rounded bg-black/40 p-3 font-mono text-sm">
+                <pre
+                  className={`flex-1 break-all whitespace-pre-wrap rounded bg-black/40 font-mono text-neutral-300 ${
+                    status.profile?.name ? "text-xs p-2" : "text-sm p-3"
+                  }`}
+                >
                   {status.pubkyZ32}
                 </pre>
                 <button
@@ -481,7 +534,6 @@ export default function Page() {
             {pendingAuth ? (
               <ApprovalCard
                 request={pendingAuth}
-                pubkyZ32={status.pubkyZ32}
                 authStatus={authStatus}
                 onApprove={handleApprove}
                 onDeny={handleDeny}
@@ -587,14 +639,12 @@ export default function Page() {
 
 function ApprovalCard({
   request,
-  pubkyZ32,
   authStatus,
   onApprove,
   onDeny,
   onDismiss,
 }: {
   request: ParsedAuthRequest;
-  pubkyZ32: string;
   authStatus: AuthStatus;
   onApprove: () => void;
   onDeny: () => void;
@@ -632,7 +682,6 @@ function ApprovalCard({
       </div>
 
       <Row label="Relay" value={relayHost(request.relay)} />
-      <Row label="Pubky" value={pubkyZ32} mono />
       {request.kind === "signup" && (
         <div>
           <div className="flex items-center gap-2">
