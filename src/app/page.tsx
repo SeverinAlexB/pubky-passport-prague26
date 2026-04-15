@@ -775,9 +775,13 @@ export default function Page() {
               )}
             </div>
 
-            <div className="rounded-lg border border-red-900/60 bg-red-950/20 p-4">
+            <div className={showWipe ? "rounded-lg border border-red-900/60 bg-red-950/20 p-4" : ""}>
               <button
-                className="text-xs text-red-300 hover:text-red-200"
+                className={
+                  showWipe
+                    ? "text-xs text-red-300 hover:text-red-200"
+                    : "text-[11px] text-neutral-600 hover:text-neutral-400 underline-offset-2 hover:underline"
+                }
                 onClick={() => {
                   setShowWipe((s) => !s);
                   if (showWipe) {
@@ -786,7 +790,7 @@ export default function Page() {
                   }
                 }}
               >
-                {showWipe ? "Hide" : "Show"} danger zone · delete everything
+                {showWipe ? "Hide danger zone" : "Delete everything…"}
               </button>
               {showWipe && (
                 <div className="mt-3 space-y-3">
