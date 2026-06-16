@@ -4,7 +4,6 @@ const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 const BLOB_NAME = "passport.json";
 const VISIBLE_FOLDER_NAME = "Pubky Passport";
-const VISIBLE_BACKUP_NAME = "Pubky Passport Encrypted Backup.json";
 
 export interface DriveFile {
   id: string;
@@ -72,6 +71,11 @@ function driveString(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
+function visibleBackupName(domain: string): string {
+  const safeDomain = domain.trim().replace(/[\\/\u0000-\u001f\u007f]/g, "_") || "unknown-domain";
+  return `Pubky Passport Encrypted Backup ${safeDomain}.json`;
+}
+
 async function findVisibleFolder(accessToken: string): Promise<DriveFile | null> {
   const params = new URLSearchParams({
     spaces: "drive",
@@ -107,12 +111,16 @@ async function createVisibleFolder(accessToken: string): Promise<DriveFile> {
   return (await res.json()) as DriveFile;
 }
 
-async function findVisibleBackup(accessToken: string, folderId: string): Promise<DriveFile | null> {
+async function findVisibleBackup(
+  accessToken: string,
+  folderId: string,
+  name: string,
+): Promise<DriveFile | null> {
   const params = new URLSearchParams({
     spaces: "drive",
     fields: "files(id,name)",
     q: [
-      `name = '${driveString(VISIBLE_BACKUP_NAME)}'`,
+      `name = '${driveString(name)}'`,
       `'${driveString(folderId)}' in parents`,
       "trashed = false",
     ].join(" and "),
@@ -129,11 +137,12 @@ async function findVisibleBackup(accessToken: string, folderId: string): Promise
 async function uploadVisibleBackup(
   accessToken: string,
   folderId: string,
+  name: string,
   blob: Blob,
 ): Promise<DriveFile> {
   const boundary = `----passport${crypto.getRandomValues(new Uint32Array(1))[0].toString(16)}`;
   const metadata = {
-    name: VISIBLE_BACKUP_NAME,
+    name,
     parents: [folderId],
     mimeType: "application/json",
   };
@@ -175,10 +184,15 @@ async function updateVisibleBackup(
   return (await res.json()) as DriveFile;
 }
 
-export async function saveVisibleBackup(accessToken: string, blob: Blob): Promise<DriveFile> {
+export async function saveVisibleBackup(
+  accessToken: string,
+  blob: Blob,
+  domain: string,
+): Promise<DriveFile> {
+  const name = visibleBackupName(domain);
   const folder = (await findVisibleFolder(accessToken)) ?? (await createVisibleFolder(accessToken));
-  const existing = await findVisibleBackup(accessToken, folder.id);
+  const existing = await findVisibleBackup(accessToken, folder.id, name);
   return existing
     ? updateVisibleBackup(accessToken, existing.id, blob)
-    : uploadVisibleBackup(accessToken, folder.id, blob);
+    : uploadVisibleBackup(accessToken, folder.id, name, blob);
 }

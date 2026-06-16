@@ -16,7 +16,7 @@ export default function PrivacyPage() {
         <p>
           Passport is a browser-based signer for Pubky. It derives an encrypted secret that is stored in
           your own Google Drive and is only usable when you are signed in with your Google account and
-          have granted this app access to its hidden app-data folder.
+          have granted this app access to its hidden app-data folder and a visible encrypted backup file.
         </p>
       </section>
 
@@ -30,18 +30,17 @@ export default function PrivacyPage() {
             active.
           </li>
           <li>
-            <strong>Google Drive access (app-data folder only).</strong> Passport requests the{" "}
-            <code>drive.appdata</code> scope, which lets it read and write a hidden, app-specific folder.
-            Passport cannot see, read, or modify any other file in your Drive.
+            <strong>Google Drive access.</strong> Passport requests the <code>drive.appdata</code> scope
+            for the hidden app-specific folder and the <code>drive.file</code> scope for the visible
+            encrypted backup it creates in your Drive.
           </li>
           <li>
-            <strong>Optional visible Google Drive backup.</strong> If you choose to save a visible backup,
-            Passport asks for the <code>drive.file</code> scope and writes another encrypted copy to a
-            <code> Pubky Passport</code> folder in your normal Google Drive.
+            <strong>Visible Google Drive backup.</strong> Passport writes another encrypted copy to a
+            <code> Pubky Passport</code> folder in your normal Google Drive, named for the Passport site domain.
           </li>
           <li>
             <strong>Encrypted passport blob.</strong> Your signing key is encrypted in your browser and
-            stored as a file in the hidden Drive folder. Optional visible backups contain the same encrypted
+            stored as a file in the hidden Drive folder. Visible backups contain the same encrypted
             blob format. Passport never uploads the plaintext key anywhere.
           </li>
         </ul>
@@ -66,7 +65,7 @@ export default function PrivacyPage() {
         <ul className="list-disc space-y-1 pl-5">
           <li>No third-party analytics, advertising, or tracking.</li>
           <li>No sale or sharing of your data.</li>
-          <li>No access to Drive files outside the app-data folder unless you opt into a visible Drive backup.</li>
+          <li>No broad access to arbitrary Drive files; Passport uses app-data access and file-level access for the visible backup it creates.</li>
           <li>No server-side storage of user profiles, keys, or blobs.</li>
         </ul>
       </section>

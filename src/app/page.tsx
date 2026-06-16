@@ -27,7 +27,8 @@ import {
   type PubkySession,
 } from "@/lib/pubky";
 
-const OIDC_SCOPES = "openid email profile https://www.googleapis.com/auth/drive.appdata";
+const OIDC_SCOPES =
+  "openid email profile https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file";
 const OIDC_AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const IDLE_MS = 5 * 60 * 1000;
 const DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
@@ -190,7 +191,14 @@ function readStoredDriveFileToken(): string | null {
 }
 
 type OidcFragmentResult =
-  | { kind: "login"; idToken: string; accessToken: string; expiresIn: number; authUrl: string | null }
+  | {
+      kind: "login";
+      idToken: string;
+      accessToken: string;
+      expiresIn: number;
+      authUrl: string | null;
+      hasDriveFileScope: boolean;
+    }
   | { kind: "visible-backup"; accessToken: string; expiresIn: number }
   | { error: string };
 
@@ -258,6 +266,9 @@ function consumeOidcFragment(): OidcFragmentResult | null {
         "Google Drive permission was not granted. On the consent screen, make sure the box for \"See, edit, create and delete only the specific Google Drive files you use with this app\" is checked, then try again.",
     };
   }
+  if (!scopes.includes(DRIVE_FILE_SCOPE)) {
+    return { error: "Google Drive file permission was not granted." };
+  }
 
   const payload = decodeIdTokenPayload(idToken);
   if (!payload || payload.nonce !== expectedNonce) {
@@ -270,7 +281,12 @@ function consumeOidcFragment(): OidcFragmentResult | null {
     accessToken,
     expiresIn: expiresInSec,
     authUrl: typeof statePayload.authUrl === "string" ? statePayload.authUrl : null,
+    hasDriveFileScope: scopes.includes(DRIVE_FILE_SCOPE),
   };
+}
+
+function currentDomain(): string {
+  return window.location.hostname || "localhost";
 }
 
 function decodeIdTokenPayload(idToken: string): Record<string, unknown> | null {
@@ -325,6 +341,7 @@ export default function Page() {
   const rehydratedRef = useRef(false);
   const pendingDeepLinkRef = useRef<string | null>(null);
   const homeserverEnsuredRef = useRef(false);
+  const autoVisibleBackupRef = useRef<string | null>(null);
 
   const signOut = useCallback(() => {
     wipe(secretRef.current);
@@ -333,6 +350,7 @@ export default function Page() {
     wrapKeyRef.current = null;
     wrapKeyPromiseRef.current = null;
     emailRef.current = null;
+    autoVisibleBackupRef.current = null;
     homeserverEnsuredRef.current = false;
     setPendingAuth(null);
     setPasteValue("");
@@ -437,15 +455,16 @@ export default function Page() {
     });
   }, []);
 
-  const saveVisibleDriveBackup = useCallback(async (blob: Blob) => {
+  const saveVisibleDriveBackup = useCallback(async (blob: Blob, opts?: { promptForConsent?: boolean }) => {
     const accessToken = readStoredDriveFileToken();
     if (!accessToken) {
+      if (opts?.promptForConsent === false) return;
       beginGoogleDriveFileConsent();
       return;
     }
     setVisibleBackupStatus({ kind: "saving" });
     try {
-      const file = await saveVisibleBackup(accessToken, blob);
+      const file = await saveVisibleBackup(accessToken, blob, currentDomain());
       setVisibleBackupStatus({ kind: "saved", file });
       resetIdle();
     } catch (err) {
@@ -471,6 +490,9 @@ export default function Page() {
         if (fragment.authUrl) pendingDeepLinkRef.current = fragment.authUrl;
         storeIdToken(fragment.idToken);
         storeAccessToken(fragment.accessToken, fragment.expiresIn);
+        if (fragment.hasDriveFileScope) {
+          storeDriveFileAccessToken(fragment.accessToken, fragment.expiresIn);
+        }
         emailRef.current = decodeIdToken(fragment.idToken).email;
         (async () => {
           try {
@@ -519,6 +541,14 @@ export default function Page() {
     if (sessionStorage.getItem(SS.pendingVisibleBackup) !== "1") return;
     sessionStorage.removeItem(SS.pendingVisibleBackup);
     void saveVisibleDriveBackup(status.blob);
+  }, [saveVisibleDriveBackup, status]);
+
+  useEffect(() => {
+    if (status.kind !== "unlocked") return;
+    const key = `${status.pubkyZ32}:${status.blob.iv}:${status.blob.ct}`;
+    if (autoVisibleBackupRef.current === key) return;
+    autoVisibleBackupRef.current = key;
+    void saveVisibleDriveBackup(status.blob, { promptForConsent: false });
   }, [saveVisibleDriveBackup, status]);
 
   useEffect(() => {
@@ -662,7 +692,7 @@ export default function Page() {
         <header className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">Passport</h1>
           <p className="text-sm text-neutral-400">
-            A Pubky signer. Your key lives encrypted in your Google Drive, unlocked only with both Google and this app.
+            A Pubky signer. Your key lives encrypted in Google Drive, with hidden and visible backups.
           </p>
         </header>
 
@@ -675,7 +705,7 @@ export default function Page() {
         {status.kind === "idle" && (
           <div className="rounded-lg border border-neutral-800 bg-neutral-900/50 p-6 space-y-3">
             <p className="text-sm text-neutral-300">
-              Sign in with Google to unlock your passport. We&apos;ll request Drive app-storage access in the same step.
+              Sign in with Google to unlock your passport. We&apos;ll request Drive access for a hidden app backup and a visible encrypted backup.
             </p>
             <button
               className="rounded bg-white px-4 py-2 text-sm font-medium text-black hover:bg-neutral-200"
@@ -690,7 +720,7 @@ export default function Page() {
               Sign in with Google
             </button>
             <p className="text-xs text-neutral-500">
-              Your encrypted secret lives in a hidden, app-only folder. Not visible in your main Drive UI.
+              Passport stores <code>passport.json</code> in a hidden app-only folder and keeps a visible encrypted copy in <code>Pubky Passport</code>.
             </p>
           </div>
         )}
@@ -850,9 +880,8 @@ export default function Page() {
                   </button>
                   <div className="border-t border-neutral-800 pt-3 space-y-2">
                     <p className="text-xs text-neutral-500">
-                      Also save the current encrypted <code>passport.json</code> as a visible file in
-                      <code> Pubky Passport</code> on Google Drive. This does not need a passphrase,
-                      but Google will ask for file-level Drive permission.
+                      Passport automatically saves the current encrypted <code>passport.json</code> as a visible file in
+                      <code> Pubky Passport</code> on Google Drive. Use this to retry or refresh it manually.
                     </p>
                     {visibleBackupStatus.kind === "saved" && (
                       <p className="text-xs text-green-400">

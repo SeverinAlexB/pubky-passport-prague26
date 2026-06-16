@@ -24,7 +24,7 @@ export default function TermsPage() {
         <h2 className="mb-2 text-lg font-semibold text-white">Your Responsibility</h2>
         <p>
           You are responsible for your Pubky identity, your Google account, and any recovery files or
-          visible Drive backups you create. If you delete your encrypted key material or lose access to
+          visible Drive backups created for you. If you delete your encrypted key material or lose access to
           your Google account without another backup, your Pubky key may be unrecoverable.
         </p>
       </section>

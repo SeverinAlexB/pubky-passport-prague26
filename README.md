@@ -12,8 +12,8 @@ See `passport-webapp-design.md` for the design and threat model.
 2. **APIs & Services → Library** → enable **Google Drive API**.
 3. **APIs & Services → OAuth consent screen**:
    - User type: External, status: Testing.
-   - Add yourself as a test user (otherwise the `drive.appdata` scope triggers verification).
-   - Add scopes: `.../auth/userinfo.email`, `openid`, `.../auth/drive.appdata`, and optionally `.../auth/drive.file` for visible Drive backups.
+   - Add yourself as a test user (otherwise the Drive scopes trigger verification).
+   - Add scopes: `.../auth/userinfo.email`, `openid`, `.../auth/drive.appdata`, and `.../auth/drive.file`.
 4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**:
    - Application type: Web application.
    - Authorized JavaScript origins: `http://localhost:3000`.
@@ -46,12 +46,12 @@ Open http://localhost:3000.
 ## How it works
 
 1. `GoogleLogin` returns a Google **ID token** (identity proof).
-2. `useGoogleLogin` with `drive.appdata` scope returns an **access token** (Drive API auth).
+2. Google login with `drive.appdata` and `drive.file` scopes returns an **access token** (Drive API auth).
 3. Client POSTs the ID token to `/api/wrapping-key`. Server verifies via `google-auth-library`, extracts `sub`, derives a per-user AES-256 key via `HKDF-SHA256(SERVER_SECRET, salt="passport-v1", info="wrap:${sub}")`, returns it. `sub` is used in-memory only, never logged.
 4. Client queries Drive `appDataFolder` for `passport.json`:
    - If present: download, AES-GCM decrypt with the wrapping key → 32-byte secret.
    - If absent: `crypto.getRandomValues(32)` → AES-GCM encrypt → upload.
-5. After unlock, the user can optionally grant `drive.file` and save a visible encrypted backup at `Pubky Passport/Pubky Passport Encrypted Backup.json` in normal Google Drive.
+5. After every unlock, the client saves or updates a visible encrypted backup at `Pubky Passport/Pubky Passport Encrypted Backup {domain}.json` in normal Google Drive.
 6. Secret is kept in memory only. Wiped on sign-out, 5-minute idle timeout, or tab close.
 
 ## Verification
