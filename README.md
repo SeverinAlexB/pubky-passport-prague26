@@ -13,7 +13,7 @@ See `passport-webapp-design.md` for the design and threat model.
 3. **APIs & Services → OAuth consent screen**:
    - User type: External, status: Testing.
    - Add yourself as a test user (otherwise the `drive.appdata` scope triggers verification).
-   - Add scopes: `.../auth/userinfo.email`, `openid`, and `.../auth/drive.appdata`.
+   - Add scopes: `.../auth/userinfo.email`, `openid`, `.../auth/drive.appdata`, and optionally `.../auth/drive.file` for visible Drive backups.
 4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**:
    - Application type: Web application.
    - Authorized JavaScript origins: `http://localhost:3000`.
@@ -51,7 +51,8 @@ Open http://localhost:3000.
 4. Client queries Drive `appDataFolder` for `passport.json`:
    - If present: download, AES-GCM decrypt with the wrapping key → 32-byte secret.
    - If absent: `crypto.getRandomValues(32)` → AES-GCM encrypt → upload.
-5. Secret is displayed as 64 hex chars (show/hide toggle). Wiped on sign-out, 5-minute idle timeout, or tab close.
+5. After unlock, the user can optionally grant `drive.file` and save a visible encrypted backup at `Pubky Passport/Pubky Passport Encrypted Backup.json` in normal Google Drive.
+6. Secret is kept in memory only. Wiped on sign-out, 5-minute idle timeout, or tab close.
 
 ## Verification
 
@@ -59,7 +60,8 @@ Open http://localhost:3000.
 - Same account across sessions produces the same secret (deterministic HKDF).
 - `POST /api/wrapping-key` without or with an invalid Bearer token returns `401`.
 - `appDataFolder` blob is hidden from the user's main Drive UI. Inspect via https://developers.google.com/drive/api/reference/rest/v3/files/list with `spaces=appDataFolder`.
-- Revoking the app in Google account settings deletes the blob.
+- Revoking the app in Google account settings blocks future access but does not delete existing Drive files.
+- The visible backup is another encrypted `passport.json` copy for availability, not a passphrase-protected recovery file.
 
 ## Threat model note
 

@@ -35,9 +35,14 @@ export default function PrivacyPage() {
             Passport cannot see, read, or modify any other file in your Drive.
           </li>
           <li>
+            <strong>Optional visible Google Drive backup.</strong> If you choose to save a visible backup,
+            Passport asks for the <code>drive.file</code> scope and writes another encrypted copy to a
+            <code> Pubky Passport</code> folder in your normal Google Drive.
+          </li>
+          <li>
             <strong>Encrypted passport blob.</strong> Your signing key is encrypted in your browser and
-            stored as a single file in that hidden Drive folder. Passport never uploads the plaintext key
-            anywhere.
+            stored as a file in the hidden Drive folder. Optional visible backups contain the same encrypted
+            blob format. Passport never uploads the plaintext key anywhere.
           </li>
         </ul>
       </section>
@@ -61,7 +66,7 @@ export default function PrivacyPage() {
         <ul className="list-disc space-y-1 pl-5">
           <li>No third-party analytics, advertising, or tracking.</li>
           <li>No sale or sharing of your data.</li>
-          <li>No access to Drive files outside the app-data folder.</li>
+          <li>No access to Drive files outside the app-data folder unless you opt into a visible Drive backup.</li>
           <li>No server-side storage of user profiles, keys, or blobs.</li>
         </ul>
       </section>

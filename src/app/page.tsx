@@ -8,7 +8,14 @@ import {
   wipe,
   type Blob,
 } from "@/lib/crypto-client";
-import { deleteBlob, downloadBlob, findBlobFile, uploadBlob, type DriveFile } from "@/lib/drive";
+import {
+  deleteBlob,
+  downloadBlob,
+  findBlobFile,
+  saveVisibleBackup,
+  uploadBlob,
+  type DriveFile,
+} from "@/lib/drive";
 import {
   createSigner,
   fetchProfile,
@@ -23,14 +30,25 @@ import {
 const OIDC_SCOPES = "openid email profile https://www.googleapis.com/auth/drive.appdata";
 const OIDC_AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const IDLE_MS = 5 * 60 * 1000;
+const DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 
 const SS = {
   idToken: "passport.idToken",
   idExp: "passport.idExp",
   accessToken: "passport.accessToken",
   accessExp: "passport.accessExp",
+  driveFileAccessToken: "passport.driveFileAccessToken",
+  driveFileAccessExp: "passport.driveFileAccessExp",
   oidcNonce: "passport.oidcNonce",
   oidcState: "passport.oidcState",
+  pendingVisibleBackup: "passport.pendingVisibleBackup",
+};
+
+type OidcStatePayload = {
+  csrf?: string;
+  authUrl?: string;
+  purpose?: "login" | "visible-backup";
 };
 
 function randomBase64Url(bytes: number): string {
@@ -56,7 +74,9 @@ function beginGoogleLogin(deepLinkAuthUrl: string | null) {
   }
   const nonce = randomBase64Url(32);
   const csrf = randomBase64Url(32);
-  const statePayload = deepLinkAuthUrl ? { csrf, authUrl: deepLinkAuthUrl } : { csrf };
+  const statePayload: OidcStatePayload = deepLinkAuthUrl
+    ? { csrf, authUrl: deepLinkAuthUrl, purpose: "login" }
+    : { csrf, purpose: "login" };
   const state = base64UrlEncode(JSON.stringify(statePayload));
 
   sessionStorage.setItem(SS.oidcNonce, nonce);
@@ -68,6 +88,29 @@ function beginGoogleLogin(deepLinkAuthUrl: string | null) {
     scope: OIDC_SCOPES,
     redirect_uri: window.location.origin,
     nonce,
+    state,
+    prompt: "consent",
+    include_granted_scopes: "true",
+  });
+  window.location.assign(`${OIDC_AUTHORIZE_ENDPOINT}?${params.toString()}`);
+}
+
+function beginGoogleDriveFileConsent() {
+  const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    throw new Error("NEXT_PUBLIC_GOOGLE_CLIENT_ID not configured");
+  }
+  const csrf = randomBase64Url(32);
+  const state = base64UrlEncode(JSON.stringify({ csrf, purpose: "visible-backup" }));
+
+  sessionStorage.setItem(SS.oidcState, csrf);
+  sessionStorage.setItem(SS.pendingVisibleBackup, "1");
+
+  const params = new URLSearchParams({
+    client_id: clientId,
+    response_type: "token",
+    scope: DRIVE_FILE_SCOPE,
+    redirect_uri: window.location.origin,
     state,
     prompt: "consent",
     include_granted_scopes: "true",
@@ -114,9 +157,17 @@ function storeIdToken(idToken: string) {
   if (exp) sessionStorage.setItem(SS.idExp, String(exp));
 }
 
+function storeExpiringToken(tokenKey: string, expKey: string, token: string, expiresInSec: number) {
+  sessionStorage.setItem(tokenKey, token);
+  sessionStorage.setItem(expKey, String(Date.now() + expiresInSec * 1000));
+}
+
 function storeAccessToken(accessToken: string, expiresInSec: number) {
-  sessionStorage.setItem(SS.accessToken, accessToken);
-  sessionStorage.setItem(SS.accessExp, String(Date.now() + expiresInSec * 1000));
+  storeExpiringToken(SS.accessToken, SS.accessExp, accessToken, expiresInSec);
+}
+
+function storeDriveFileAccessToken(accessToken: string, expiresInSec: number) {
+  storeExpiringToken(SS.driveFileAccessToken, SS.driveFileAccessExp, accessToken, expiresInSec);
 }
 
 function readStoredTokens(): { idToken: string; accessToken: string } | null {
@@ -130,10 +181,17 @@ function readStoredTokens(): { idToken: string; accessToken: string } | null {
   return { idToken, accessToken };
 }
 
-const DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+function readStoredDriveFileToken(): string | null {
+  const accessToken = sessionStorage.getItem(SS.driveFileAccessToken);
+  const accessExp = Number(sessionStorage.getItem(SS.driveFileAccessExp));
+  if (!accessToken || !accessExp) return null;
+  if (accessExp < Date.now() + 5_000) return null;
+  return accessToken;
+}
 
 type OidcFragmentResult =
-  | { idToken: string; accessToken: string; expiresIn: number; authUrl: string | null }
+  | { kind: "login"; idToken: string; accessToken: string; expiresIn: number; authUrl: string | null }
+  | { kind: "visible-backup"; accessToken: string; expiresIn: number }
   | { error: string };
 
 function consumeOidcFragment(): OidcFragmentResult | null {
@@ -153,34 +211,24 @@ function consumeOidcFragment(): OidcFragmentResult | null {
     return { error: msg };
   }
 
-  const idToken = params.get("id_token");
   const accessToken = params.get("access_token");
   const expiresInRaw = params.get("expires_in");
   const returnedState = params.get("state");
   const returnedScope = params.get("scope") ?? "";
-  if (!idToken || !accessToken) return null;
+  if (!accessToken) return null;
 
   scrub();
-
-  if (!returnedScope.split(" ").includes(DRIVE_APPDATA_SCOPE)) {
-    sessionStorage.removeItem(SS.oidcState);
-    sessionStorage.removeItem(SS.oidcNonce);
-    return {
-      error:
-        "Google Drive permission was not granted. On the consent screen, make sure the box for \"See, edit, create and delete only the specific Google Drive files you use with this app\" is checked, then try again.",
-    };
-  }
 
   const expectedCsrf = sessionStorage.getItem(SS.oidcState);
   const expectedNonce = sessionStorage.getItem(SS.oidcNonce);
   sessionStorage.removeItem(SS.oidcState);
   sessionStorage.removeItem(SS.oidcNonce);
 
-  if (!expectedCsrf || !expectedNonce || !returnedState) {
+  if (!expectedCsrf || !returnedState) {
     return { error: "OIDC state missing" };
   }
 
-  let statePayload: { csrf?: string; authUrl?: string };
+  let statePayload: OidcStatePayload;
   try {
     statePayload = JSON.parse(base64UrlDecode(returnedState));
   } catch {
@@ -190,16 +238,37 @@ function consumeOidcFragment(): OidcFragmentResult | null {
     return { error: "OIDC state mismatch" };
   }
 
+  const scopes = returnedScope.split(" ");
+  const expiresIn = Number(expiresInRaw);
+  const expiresInSec = Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600;
+
+  if (statePayload.purpose === "visible-backup") {
+    if (!scopes.includes(DRIVE_FILE_SCOPE)) {
+      return { error: "Google Drive file permission was not granted." };
+    }
+    return { kind: "visible-backup", accessToken, expiresIn: expiresInSec };
+  }
+
+  const idToken = params.get("id_token");
+  if (!idToken || !expectedNonce) return { error: "OIDC token missing" };
+
+  if (!scopes.includes(DRIVE_APPDATA_SCOPE)) {
+    return {
+      error:
+        "Google Drive permission was not granted. On the consent screen, make sure the box for \"See, edit, create and delete only the specific Google Drive files you use with this app\" is checked, then try again.",
+    };
+  }
+
   const payload = decodeIdTokenPayload(idToken);
   if (!payload || payload.nonce !== expectedNonce) {
     return { error: "OIDC nonce mismatch" };
   }
 
-  const expiresIn = Number(expiresInRaw);
   return {
+    kind: "login",
     idToken,
     accessToken,
-    expiresIn: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600,
+    expiresIn: expiresInSec,
     authUrl: typeof statePayload.authUrl === "string" ? statePayload.authUrl : null,
   };
 }
@@ -236,6 +305,9 @@ export default function Page() {
   const [authStatus, setAuthStatus] = useState<AuthStatus>({ kind: "idle" });
   const [showDebug, setShowDebug] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
+  const [visibleBackupStatus, setVisibleBackupStatus] = useState<
+    { kind: "idle" } | { kind: "saving" } | { kind: "saved"; file: DriveFile } | { kind: "error"; message: string }
+  >({ kind: "idle" });
   const [backupPass, setBackupPass] = useState("");
   const [backupPass2, setBackupPass2] = useState("");
   const [backupError, setBackupError] = useState<string | null>(null);
@@ -270,6 +342,7 @@ export default function Page() {
     setBackupPass2("");
     setBackupError(null);
     setShowBackup(false);
+    setVisibleBackupStatus({ kind: "idle" });
     Object.values(SS).forEach((k) => sessionStorage.removeItem(k));
     setStatus({ kind: "idle" });
   }, []);
@@ -364,6 +437,22 @@ export default function Page() {
     });
   }, []);
 
+  const saveVisibleDriveBackup = useCallback(async (blob: Blob) => {
+    const accessToken = readStoredDriveFileToken();
+    if (!accessToken) {
+      beginGoogleDriveFileConsent();
+      return;
+    }
+    setVisibleBackupStatus({ kind: "saving" });
+    try {
+      const file = await saveVisibleBackup(accessToken, blob);
+      setVisibleBackupStatus({ kind: "saved", file });
+      resetIdle();
+    } catch (err) {
+      setVisibleBackupStatus({ kind: "error", message: (err as Error).message });
+    }
+  }, [resetIdle]);
+
   useEffect(() => {
     if (rehydratedRef.current) return;
     rehydratedRef.current = true;
@@ -372,25 +461,30 @@ export default function Page() {
     const fragment = consumeOidcFragment();
     if (fragment) {
       if ("error" in fragment) {
+        sessionStorage.removeItem(SS.pendingVisibleBackup);
         setStatus({ kind: "error", message: fragment.error });
         return;
       }
-      if (fragment.authUrl) pendingDeepLinkRef.current = fragment.authUrl;
-      storeIdToken(fragment.idToken);
-      storeAccessToken(fragment.accessToken, fragment.expiresIn);
-      emailRef.current = decodeIdToken(fragment.idToken).email;
-      (async () => {
-        try {
-          setStatus({ kind: "working", message: "Fetching wrapping key…" });
-          const wrapKey = await fetchWrappingKey(fragment.idToken);
-          wrapKeyRef.current = wrapKey;
-          await unlockWithDrive(fragment.accessToken);
-        } catch (err) {
-          Object.values(SS).forEach((k) => sessionStorage.removeItem(k));
-          setStatus({ kind: "error", message: (err as Error).message });
-        }
-      })();
-      return;
+      if (fragment.kind === "visible-backup") {
+        storeDriveFileAccessToken(fragment.accessToken, fragment.expiresIn);
+      } else {
+        if (fragment.authUrl) pendingDeepLinkRef.current = fragment.authUrl;
+        storeIdToken(fragment.idToken);
+        storeAccessToken(fragment.accessToken, fragment.expiresIn);
+        emailRef.current = decodeIdToken(fragment.idToken).email;
+        (async () => {
+          try {
+            setStatus({ kind: "working", message: "Fetching wrapping key…" });
+            const wrapKey = await fetchWrappingKey(fragment.idToken);
+            wrapKeyRef.current = wrapKey;
+            await unlockWithDrive(fragment.accessToken);
+          } catch (err) {
+            Object.values(SS).forEach((k) => sessionStorage.removeItem(k));
+            setStatus({ kind: "error", message: (err as Error).message });
+          }
+        })();
+        return;
+      }
     }
 
     const stored = readStoredTokens();
@@ -419,6 +513,13 @@ export default function Page() {
       }
     })();
   }, [fetchWrappingKey, unlockWithDrive]);
+
+  useEffect(() => {
+    if (status.kind !== "unlocked") return;
+    if (sessionStorage.getItem(SS.pendingVisibleBackup) !== "1") return;
+    sessionStorage.removeItem(SS.pendingVisibleBackup);
+    void saveVisibleDriveBackup(status.blob);
+  }, [saveVisibleDriveBackup, status]);
 
   useEffect(() => {
     if (status.kind !== "unlocked") return;
@@ -707,7 +808,7 @@ export default function Page() {
                   }
                 }}
               >
-                {showBackup ? "Hide" : "Show"} backup · download recovery file
+                {showBackup ? "Hide" : "Show"} backups
               </button>
               {showBackup && (
                 <div className="mt-3 space-y-3">
@@ -747,6 +848,30 @@ export default function Page() {
                   >
                     Download recovery file
                   </button>
+                  <div className="border-t border-neutral-800 pt-3 space-y-2">
+                    <p className="text-xs text-neutral-500">
+                      Also save the current encrypted <code>passport.json</code> as a visible file in
+                      <code> Pubky Passport</code> on Google Drive. This does not need a passphrase,
+                      but Google will ask for file-level Drive permission.
+                    </p>
+                    {visibleBackupStatus.kind === "saved" && (
+                      <p className="text-xs text-green-400">
+                        Saved visible backup: {visibleBackupStatus.file.name}
+                      </p>
+                    )}
+                    {visibleBackupStatus.kind === "error" && (
+                      <p className="text-xs text-red-400">{visibleBackupStatus.message}</p>
+                    )}
+                    <button
+                      className="rounded bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100 hover:bg-neutral-700 disabled:opacity-50"
+                      onClick={() => void saveVisibleDriveBackup(status.blob)}
+                      disabled={visibleBackupStatus.kind === "saving"}
+                    >
+                      {visibleBackupStatus.kind === "saving"
+                        ? "Saving to Drive…"
+                        : "Save visible backup to Google Drive"}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
